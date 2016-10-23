@@ -6,6 +6,18 @@
         .driver   = "virtio-pci",\
         .property = "page-per-vq",\
         .value    = "on",\
+    },{\
+        .driver   = "virtio-serial-device",\
+        .property = "emergency-write",\
+        .value    = "off",\
+    },{\
+        .driver   = "ioapic",\
+        .property = "version",\
+        .value    = "0x11",\
+    },{\
+        .driver   = "intel-iommu",\
+        .property = "x-buggy-eim",\
+        .value    = "true",\
     },
 
 #define HW_COMPAT_2_6 \

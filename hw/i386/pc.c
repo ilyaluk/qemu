@@ -161,13 +161,15 @@ int cpu_get_pic_interrupt(CPUX86State *env)
     X86CPU *cpu = x86_env_get_cpu(env);
     int intno;
 
-    intno = apic_get_interrupt(cpu->apic_state);
-    if (intno >= 0) {
-        return intno;
-    }
-    /* read the irq from the PIC */
-    if (!apic_accept_pic_intr(cpu->apic_state)) {
-        return -1;
+    if (!kvm_irqchip_in_kernel()) {
+        intno = apic_get_interrupt(cpu->apic_state);
+        if (intno >= 0) {
+            return intno;
+        }
+        /* read the irq from the PIC */
+        if (!apic_accept_pic_intr(cpu->apic_state)) {
+            return -1;
+        }
     }
 
     intno = pic_read_irq(isa_pic);
@@ -180,7 +182,7 @@ static void pic_irq_request(void *opaque, int irq, int level)
     X86CPU *cpu = X86_CPU(cs);
 
     DPRINTF("pic_irqs: %s irq %d\n", level? "raise" : "lower", irq);
-    if (cpu->apic_state) {
+    if (cpu->apic_state && !kvm_irqchip_in_kernel()) {
         CPU_FOREACH(cs) {
             cpu = X86_CPU(cs);
             if (apic_accept_pic_intr(cpu->apic_state)) {
@@ -777,11 +779,9 @@ static FWCfgState *bochs_bios_init(AddressSpace *as, PCMachineState *pcms)
     for (i = 0; i < max_cpus; i++) {
         unsigned int apic_id = x86_cpu_apic_id_from_index(i);
         assert(apic_id < pcms->apic_id_limit);
-        for (j = 0; j < nb_numa_nodes; j++) {
-            if (test_bit(i, numa_info[j].node_cpu)) {
-                numa_fw_cfg[apic_id + 1] = cpu_to_le64(j);
-                break;
-            }
+        j = numa_get_node_for_cpu(i);
+        if (j < nb_numa_nodes) {
+            numa_fw_cfg[apic_id + 1] = cpu_to_le64(j);
         }
     }
     for (i = 0; i < nb_numa_nodes; i++) {
@@ -2134,41 +2134,11 @@ static void pc_machine_initfn(Object *obj)
 {
     PCMachineState *pcms = PC_MACHINE(obj);
 
-    object_property_add(obj, PC_MACHINE_MEMHP_REGION_SIZE, "int",
-                        pc_machine_get_hotplug_memory_region_size,
-                        NULL, NULL, NULL, &error_abort);
-
     pcms->max_ram_below_4g = 0; /* use default */
-    object_property_add(obj, PC_MACHINE_MAX_RAM_BELOW_4G, "size",
-                        pc_machine_get_max_ram_below_4g,
-                        pc_machine_set_max_ram_below_4g,
-                        NULL, NULL, &error_abort);
-    object_property_set_description(obj, PC_MACHINE_MAX_RAM_BELOW_4G,
-                                    "Maximum ram below the 4G boundary (32bit boundary)",
-                                    &error_abort);
-
     pcms->smm = ON_OFF_AUTO_AUTO;
-    object_property_add(obj, PC_MACHINE_SMM, "OnOffAuto",
-                        pc_machine_get_smm,
-                        pc_machine_set_smm,
-                        NULL, NULL, &error_abort);
-    object_property_set_description(obj, PC_MACHINE_SMM,
-                                    "Enable SMM (pc & q35)",
-                                    &error_abort);
-
     pcms->vmport = ON_OFF_AUTO_AUTO;
-    object_property_add(obj, PC_MACHINE_VMPORT, "OnOffAuto",
-                        pc_machine_get_vmport,
-                        pc_machine_set_vmport,
-                        NULL, NULL, &error_abort);
-    object_property_set_description(obj, PC_MACHINE_VMPORT,
-                                    "Enable vmport (pc & q35)",
-                                    &error_abort);
-
     /* nvdimm is disabled on default. */
     pcms->acpi_nvdimm_state.is_enabled = false;
-    object_property_add_bool(obj, PC_MACHINE_NVDIMM, pc_machine_get_nvdimm,
-                             pc_machine_set_nvdimm, &error_abort);
 }
 
 static void pc_machine_reset(void)
@@ -2303,6 +2273,32 @@ static void pc_machine_class_init(ObjectClass *oc, void *data)
     hc->unplug_request = pc_machine_device_unplug_request_cb;
     hc->unplug = pc_machine_device_unplug_cb;
     nc->nmi_monitor_handler = x86_nmi;
+
+    object_class_property_add(oc, PC_MACHINE_MEMHP_REGION_SIZE, "int",
+        pc_machine_get_hotplug_memory_region_size, NULL,
+        NULL, NULL, &error_abort);
+
+    object_class_property_add(oc, PC_MACHINE_MAX_RAM_BELOW_4G, "size",
+        pc_machine_get_max_ram_below_4g, pc_machine_set_max_ram_below_4g,
+        NULL, NULL, &error_abort);
+
+    object_class_property_set_description(oc, PC_MACHINE_MAX_RAM_BELOW_4G,
+        "Maximum ram below the 4G boundary (32bit boundary)", &error_abort);
+
+    object_class_property_add(oc, PC_MACHINE_SMM, "OnOffAuto",
+        pc_machine_get_smm, pc_machine_set_smm,
+        NULL, NULL, &error_abort);
+    object_class_property_set_description(oc, PC_MACHINE_SMM,
+        "Enable SMM (pc & q35)", &error_abort);
+
+    object_class_property_add(oc, PC_MACHINE_VMPORT, "OnOffAuto",
+        pc_machine_get_vmport, pc_machine_set_vmport,
+        NULL, NULL, &error_abort);
+    object_class_property_set_description(oc, PC_MACHINE_VMPORT,
+        "Enable vmport (pc & q35)", &error_abort);
+
+    object_class_property_add_bool(oc, PC_MACHINE_NVDIMM,
+        pc_machine_get_nvdimm, pc_machine_set_nvdimm, &error_abort);
 }
 
 static const TypeInfo pc_machine_info = {

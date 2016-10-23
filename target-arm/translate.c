@@ -180,7 +180,12 @@ static inline TCGv_i32 load_reg(DisasContext *s, int reg)
 static void store_reg(DisasContext *s, int reg, TCGv_i32 var)
 {
     if (reg == 15) {
-        tcg_gen_andi_i32(var, var, ~1);
+        /* In Thumb mode, we must ignore bit 0.
+         * In ARM mode, for ARMv4 and ARMv5, it is UNPREDICTABLE if bits [1:0]
+         * are not 0b00, but for ARMv6 and above, we must ignore bits [1:0].
+         * We choose to ignore [1:0] in ARM mode for all architecture versions.
+         */
+        tcg_gen_andi_i32(var, var, s->thumb ? ~1 : ~3);
         s->is_jmp = DISAS_JUMP;
     }
     tcg_gen_mov_i32(cpu_R[reg], var);
@@ -4358,24 +4363,33 @@ static void gen_mrs_banked(DisasContext *s, int r, int sysm, int rn)
     s->is_jmp = DISAS_UPDATE;
 }
 
-/* Generate an old-style exception return. Marks pc as dead. */
-static void gen_exception_return(DisasContext *s, TCGv_i32 pc)
+/* Store value to PC as for an exception return (ie don't
+ * mask bits). The subsequent call to gen_helper_cpsr_write_eret()
+ * will do the masking based on the new value of the Thumb bit.
+ */
+static void store_pc_exc_ret(DisasContext *s, TCGv_i32 pc)
 {
-    TCGv_i32 tmp;
-    store_reg(s, 15, pc);
-    tmp = load_cpu_field(spsr);
-    gen_helper_cpsr_write_eret(cpu_env, tmp);
-    tcg_temp_free_i32(tmp);
-    s->is_jmp = DISAS_JUMP;
+    tcg_gen_mov_i32(cpu_R[15], pc);
+    tcg_temp_free_i32(pc);
 }
 
 /* Generate a v6 exception return.  Marks both values as dead.  */
 static void gen_rfe(DisasContext *s, TCGv_i32 pc, TCGv_i32 cpsr)
 {
+    store_pc_exc_ret(s, pc);
+    /* The cpsr_write_eret helper will mask the low bits of PC
+     * appropriately depending on the new Thumb bit, so it must
+     * be called after storing the new PC.
+     */
     gen_helper_cpsr_write_eret(cpu_env, cpsr);
     tcg_temp_free_i32(cpsr);
-    store_reg(s, 15, pc);
     s->is_jmp = DISAS_JUMP;
+}
+
+/* Generate an old-style exception return. Marks pc as dead. */
+static void gen_exception_return(DisasContext *s, TCGv_i32 pc)
+{
+    gen_rfe(s, pc, load_cpu_field(spsr));
 }
 
 static void gen_nop_hint(DisasContext *s, int val)
@@ -8083,7 +8097,7 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)
             case 4: /* dsb */
             case 5: /* dmb */
                 ARCH(7);
-                /* We don't emulate caches so these are a no-op.  */
+                tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
                 return;
             case 6: /* isb */
                 /* We need to break the TB after this insn to execute
@@ -9361,6 +9375,8 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)
                             } else if (i == rn) {
                                 loaded_var = tmp;
                                 loaded_base = 1;
+                            } else if (rn == 15 && exc_return) {
+                                store_pc_exc_ret(s, tmp);
                             } else {
                                 store_reg_from_load(s, i, tmp);
                             }
@@ -10432,7 +10448,7 @@ static int disas_thumb2_insn(CPUARMState *env, DisasContext *s, uint16_t insn_hw
                             break;
                         case 4: /* dsb */
                         case 5: /* dmb */
-                            /* These execute as NOPs.  */
+                            tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
                             break;
                         case 6: /* isb */
                             /* We need to break the TB after this insn
